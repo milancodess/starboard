@@ -5,6 +5,9 @@ const {
   EmbedBuilder,
   ActivityType,
   Collection,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require("discord.js");
 const mongoose = require("mongoose");
 const Starboard = require("./models/Starboard");
@@ -75,54 +78,30 @@ function isSelfReact(reaction, user) {
   return reaction.message.author.id === user.id;
 }
 
-// Get message content including images and GIFs
 function getMessageContent(message) {
   let content = "";
 
-  // Add text content if exists
   if (message.content && message.content.trim()) {
     content = message.content;
   }
 
-  // Handle attachments (images, GIFs, videos)
   if (message.attachments.size > 0) {
     for (const attachment of message.attachments.values()) {
-      // Check if it's an image or GIF
       if (
-        attachment.contentType &&
-        (attachment.contentType.startsWith("image/") ||
-          attachment.contentType.startsWith("video/"))
+        !attachment.contentType ||
+        (!attachment.contentType.startsWith("image/") &&
+          !attachment.contentType.startsWith("video/"))
       ) {
-        // For images/GIFs, we'll set them as embed image instead of in content
-        // So we don't add text for them
-        if (!content) {
-          // If no text content, we'll show a placeholder
-          content = content || "*Image/GIF attached*";
-        }
-      } else {
-        // For other file types, show the filename
         content += `\n📎 ${attachment.name}`;
       }
     }
   }
 
-  // Handle embeds (links that expand to images/videos)
-  if (message.embeds.length > 0) {
-    for (const embed of message.embeds) {
-      if (embed.image || embed.thumbnail || embed.video) {
-        if (!content) {
-          content = content || "*Embedded media attached*";
-        }
-      }
-    }
-  }
-
-  // Handle stickers
   if (message.stickers.size > 0) {
     content += `\n🖼️ **Sticker**: ${message.stickers.first().name || "Sticker"}`;
   }
 
-  return content || "*No text content*";
+  return content || null;
 }
 
 // Get image/GIF URL from message
@@ -160,56 +139,46 @@ function isGif(message) {
   return false;
 }
 
-// Create starboard embed with image/GIF support
-function createStarboardEmbed(
-  message,
-  triggerEmoji,
-  triggerCount,
-  allReactions,
-) {
-  // Get message content
+function createStarboardEmbed(message, triggerEmoji, triggerCount) {
   let content = getMessageContent(message);
 
-  // Truncate if too long
-  if (content.length > 2000) {
+  if (content && content.length > 2000) {
     content = content.substring(0, 1997) + "...";
   }
 
-  // Create the main embed
   const embed = new EmbedBuilder()
-    .setDescription(content)
     .setColor(config.COLORS.STARBOARD)
     .setTimestamp(message.createdAt)
     .setAuthor({
       name: message.author.displayName,
       iconURL: message.author.avatarURL() || message.author.defaultAvatarURL,
-    })
-    .setFooter({
-      text: `⭐ Starred Message | Message ID: ${message.id}`,
-      iconURL: client.user.avatarURL(),
     });
 
-  // Add image/GIF if exists
+  if (content) {
+    embed.setDescription(content);
+  }
+
   const imageUrl = getImageUrl(message);
   if (imageUrl) {
     embed.setImage(imageUrl);
   }
 
-  // Add reactions field showing the count
   embed.addFields({
     name: `${triggerEmoji} Reactions`,
     value: `${triggerCount} reactions`,
     inline: false,
   });
 
-  // Add the jump link as a field
-  embed.addFields({
-    name: "",
-    value: `[Jump to Message](${message.url})`,
-    inline: false,
-  });
-
   return embed;
+}
+
+function createJumpButton(message) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setLabel("Jump to Message")
+      .setStyle(ButtonStyle.Link)
+      .setURL(message.url),
+  );
 }
 
 // Check if any emoji has reached threshold
@@ -281,15 +250,14 @@ async function sendToStarboard(
         existingEntry.starboardMessageId,
       );
 
-      // Update the embed
       const embed = createStarboardEmbed(
         message,
         existingEntry.triggerEmoji,
         existingEntry.reactionCount,
-        allReactions,
       );
+      const row = createJumpButton(message);
 
-      await starboardMessage.edit({ embeds: [embed] });
+      await starboardMessage.edit({ embeds: [embed], components: [row] });
 
       console.log(
         `✅ Updated starboard message for ${message.id} (${triggerEmoji}: ${triggerCount} reactions)`,
@@ -320,10 +288,10 @@ async function sendToStarboard(
         message,
         triggerEmoji,
         triggerCount,
-        allReactions,
       );
+      const row = createJumpButton(message);
 
-      const starboardMessage = await starboardChannel.send({ embeds: [embed] });
+      const starboardMessage = await starboardChannel.send({ embeds: [embed], components: [row] });
 
       // Save to database
       const starboardEntry = new Starboard({
