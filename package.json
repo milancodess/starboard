@@ -2,10 +2,11 @@
   "name": "discord-starboard-bot",
   "version": "1.0.0",
   "description": "A Discord starboard bot that triggers when ANY individual emoji reaches 4+ reactions",
-  "main": "index.js",
+  "main": "api/bot.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "vercel-build": "echo 'Vercel build complete'"
   },
   "dependencies": {
     "discord.js": "^14.14.1",
@@ -14,5 +15,8 @@
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=18.x"
   }
 }

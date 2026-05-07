@@ -1,23 +1,15 @@
 module.exports = {
-  // Starboard settings
-  STARBOARD_CHANNEL_ID: "1501917633111523399",
-  REACTION_THRESHOLD: 4, // Individual emoji must reach 4
-
-  // Bot settings
-  PREFIX: "!",
-
-  // MongoDB settings
+  STARBOARD_CHANNEL_ID: process.env.STARBOARD_CHANNEL_ID || "1501917633111523399",
+  REACTION_THRESHOLD: parseInt(process.env.REACTION_THRESHOLD, 10) || 4,
+  PREFIX: process.env.PREFIX || "!",
   MONGODB_URI: process.env.MONGODB_URI,
-  // Features
-  ALLOW_BOT_MESSAGES: false, // Whether to allow bot messages to be starred
-  ALLOW_SELF_REACT: false, // Whether users can react to their own messages
-  REMOVE_ON_THRESHOLD_DROP: false, // Whether to remove from starboard if reactions drop below threshold
-
-  // Embed colors
+  ALLOW_BOT_MESSAGES: process.env.ALLOW_BOT_MESSAGES === "true",
+  ALLOW_SELF_REACT: process.env.ALLOW_SELF_REACT === "true",
+  REMOVE_ON_THRESHOLD_DROP: process.env.REMOVE_ON_THRESHOLD_DROP === "true",
   COLORS: {
-    STARBOARD: 0xffd700, // Gold color for starboard
-    ERROR: 0xff0000, // Red
-    SUCCESS: 0x00ff00, // Green
-    INFO: 0x0099ff, // Blue
+    STARBOARD: parseInt(process.env.COLOR_STARBOARD, 16) || 0xffd700,
+    ERROR: parseInt(process.env.COLOR_ERROR, 16) || 0xff0000,
+    SUCCESS: parseInt(process.env.COLOR_SUCCESS, 16) || 0x00ff00,
+    INFO: parseInt(process.env.COLOR_INFO, 16) || 0x0099ff,
   },
 };
