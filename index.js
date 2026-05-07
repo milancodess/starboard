@@ -569,6 +569,21 @@ client.on("messageCreate", async (message) => {
   }
 });
 
+// HTTP health check server for Render
+const http = require("http");
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({
+    status: "online",
+    bot: client.user?.tag || "connecting",
+    guilds: client.guilds?.cache?.size || 0,
+  }));
+});
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => {
+  console.log(`🌐 Health check server running on port ${PORT}`);
+});
+
 // Handle errors
 client.on("error", (error) => {
   console.error("Discord client error:", error);
@@ -576,6 +591,13 @@ client.on("error", (error) => {
 
 process.on("unhandledRejection", (error) => {
   console.error("Unhandled promise rejection:", error);
+});
+
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received, shutting down...");
+  client.destroy();
+  server.close();
+  process.exit(0);
 });
 
 // Login to Discord

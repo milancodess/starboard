@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: starboard-bot
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: 18
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: STARBOARD_CHANNEL_ID
+        sync: false
+      - key: REACTION_THRESHOLD
+        value: 4
+      - key: PREFIX
+        value: "!"
+      - key: ALLOW_BOT_MESSAGES
+        value: "false"
+      - key: ALLOW_SELF_REACT
+        value: "false"
+      - key: REMOVE_ON_THRESHOLD_DROP
+        value: "false"
