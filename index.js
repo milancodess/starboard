@@ -10,10 +10,35 @@ const {
   ButtonStyle,
   PermissionFlagsBits,
   MessageFlags,
+  SlashCommandBuilder,
+  ChannelType,
+  AttachmentBuilder,
 } = require("discord.js");
 const mongoose = require("mongoose");
 const Starboard = require("./models/Starboard");
 const config = require("./config");
+const metaDownloader = require("metadownloader");
+
+const META_MAX_DOWNLOAD_BYTES =
+  (parseInt(process.env.META_MAX_DOWNLOAD_MB, 10) || 25) * 1024 * 1024;
+
+const LOG_COLORS = {
+  success: "\x1b[32m",
+  error: "\x1b[31m",
+  info: "\x1b[37m",
+  reset: "\x1b[0m",
+};
+
+function logWithColor(method, color, args) {
+  const [first = "", ...rest] = args;
+  method(`${color}${first}`, ...rest, LOG_COLORS.reset);
+}
+
+const logger = {
+  success: (...args) => logWithColor(console.log, LOG_COLORS.success, args),
+  error: (...args) => logWithColor(console.error, LOG_COLORS.error, args),
+  info: (...args) => logWithColor(console.log, LOG_COLORS.info, args),
+};
 
 // Create bot client
 const client = new Client({
@@ -29,16 +54,48 @@ const client = new Client({
 // Cache for cooldowns
 const cooldowns = new Collection();
 
+const slashCommands = [
+  new SlashCommandBuilder()
+    .setName("stats")
+    .setDescription("View starboard statistics"),
+  new SlashCommandBuilder()
+    .setName("help")
+    .setDescription("Show starboard bot help"),
+  new SlashCommandBuilder()
+    .setName("copy")
+    .setDescription("Copy messages from another channel into this channel")
+    .addChannelOption((option) =>
+      option
+        .setName("source")
+        .setDescription("The channel to copy messages from")
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setRequired(true),
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName("limit")
+        .setDescription("Optional number of messages to copy")
+        .setMinValue(1)
+        .setRequired(false),
+    ),
+  new SlashCommandBuilder()
+    .setName("meta")
+    .setDescription("Download an Instagram or Facebook video")
+    .addStringOption((option) =>
+      option
+        .setName("url")
+        .setDescription("Instagram or Facebook video URL")
+        .setRequired(true),
+    ),
+].map((command) => command.toJSON());
+
 // MongoDB Connection
 async function connectMongoDB() {
   try {
-    await mongoose.connect(config.MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
-    console.log("✅ MongoDB connected successfully");
+    await mongoose.connect(config.MONGODB_URI);
+    logger.success("MongoDB connected successfully");
   } catch (error) {
-    console.error("❌ MongoDB connection error:", error);
+    logger.error("MongoDB connection error:", error);
     process.exit(1);
   }
 }
@@ -94,13 +151,13 @@ function getMessageContent(message) {
         (!attachment.contentType.startsWith("image/") &&
           !attachment.contentType.startsWith("video/"))
       ) {
-        content += `\n📎 ${attachment.name}`;
+        content += `\nAttachment: ${attachment.name}`;
       }
     }
   }
 
   if (message.stickers.size > 0) {
-    content += `\n🖼️ **Sticker**: ${message.stickers.first().name || "Sticker"}`;
+    content += `\n**Sticker**: ${message.stickers.first().name || "Sticker"}`;
   }
 
   return content || null;
@@ -166,7 +223,7 @@ function createStarboardEmbed(message, triggerEmoji, triggerCount) {
   }
 
   embed.addFields({
-    name: `${triggerEmoji} Reactions`,
+    name: "Trigger Reactions",
     value: `${triggerCount} reactions`,
     inline: false,
   });
@@ -194,8 +251,8 @@ function resolveChannelArgument(message, channelArg) {
   return message.guild.channels.cache.get(channelId) || null;
 }
 
-function userCanCopyMessages(message) {
-  return message.member.permissions.has(PermissionFlagsBits.ManageGuild);
+function userCanCopyMessages(member) {
+  return member.permissions.has(PermissionFlagsBits.ManageGuild);
 }
 
 function botCanCopyMessages(sourceChannel, destinationChannel) {
@@ -271,29 +328,33 @@ async function fetchChannelMessages(channel, limit = null) {
   return messages.reverse();
 }
 
-async function copyChannelMessages(commandMessage, args) {
-  if (!userCanCopyMessages(commandMessage)) {
-    await commandMessage.reply({
+async function copyChannelMessages({
+  member,
+  sourceChannel,
+  destinationChannel,
+  requestedLimit,
+  reply,
+  editReply,
+}) {
+  if (!userCanCopyMessages(member)) {
+    await reply({
       content: "You need the **Manage Server** permission to copy channels.",
       allowedMentions: { parse: [] },
     });
     return;
   }
 
-  const sourceChannel = resolveChannelArgument(commandMessage, args[1]);
-  const destinationChannel = commandMessage.channel;
-
   if (!sourceChannel || !sourceChannel.isTextBased()) {
-    await commandMessage.reply({
+    await reply({
       content:
-        "Please choose a text channel to copy from. Example: `!starboard copy #source-channel`",
+        "Please choose a text channel to copy from. Example: `!copy #source-channel` or `/copy source:#source-channel`",
       allowedMentions: { parse: [] },
     });
     return;
   }
 
   if (sourceChannel.id === destinationChannel.id) {
-    await commandMessage.reply({
+    await reply({
       content:
         "Choose a different destination channel, then run the command there.",
       allowedMentions: { parse: [] },
@@ -302,7 +363,7 @@ async function copyChannelMessages(commandMessage, args) {
   }
 
   if (!botCanCopyMessages(sourceChannel, destinationChannel)) {
-    await commandMessage.reply({
+    await reply({
       content:
         "I need permission to view/read the source channel and send messages with attachments in this channel.",
       allowedMentions: { parse: [] },
@@ -310,16 +371,18 @@ async function copyChannelMessages(commandMessage, args) {
     return;
   }
 
-  const requestedLimit = args[2] ? parseInt(args[2], 10) : null;
-  if (args[2] && (!Number.isInteger(requestedLimit) || requestedLimit < 1)) {
-    await commandMessage.reply({
+  if (
+    requestedLimit !== null &&
+    (!Number.isInteger(requestedLimit) || requestedLimit < 1)
+  ) {
+    await reply({
       content: "The optional limit must be a positive number.",
       allowedMentions: { parse: [] },
     });
     return;
   }
 
-  const statusMessage = await commandMessage.reply({
+  const statusMessage = await reply({
     content: `Copying messages from ${sourceChannel} into this channel...`,
     allowedMentions: { parse: [] },
   });
@@ -348,7 +411,8 @@ async function copyChannelMessages(commandMessage, args) {
       copiedCount++;
 
       if (copiedCount % 25 === 0) {
-        await statusMessage.edit(
+        await editReply(
+          statusMessage,
           `Copying messages from ${sourceChannel}... ${copiedCount}/${messages.length} copied.`,
         );
       }
@@ -356,14 +420,227 @@ async function copyChannelMessages(commandMessage, args) {
       await sleep(750);
     }
 
-    await statusMessage.edit(
+    await editReply(
+      statusMessage,
       `Done copying from ${sourceChannel}. Copied ${copiedCount} message(s), skipped ${skippedCount}.`,
     );
   } catch (error) {
-    console.error("Error copying channel messages:", error);
-    await statusMessage.edit(
+    logger.error("Error copying channel messages:", error);
+    await editReply(
+      statusMessage,
       "Something went wrong while copying messages. Check my channel permissions and try again.",
     );
+  }
+}
+
+async function copyChannelMessagesFromMessage(message, args) {
+  const requestedLimit = args[1] ? parseInt(args[1], 10) : null;
+
+  await copyChannelMessages({
+    member: message.member,
+    sourceChannel: resolveChannelArgument(message, args[0]),
+    destinationChannel: message.channel,
+    requestedLimit,
+    reply: (payload) => message.reply(payload),
+    editReply: (statusMessage, content) => statusMessage.edit(content),
+  });
+}
+
+async function copyChannelMessagesFromInteraction(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  await copyChannelMessages({
+    member: interaction.member,
+    sourceChannel: interaction.options.getChannel("source"),
+    destinationChannel: interaction.channel,
+    requestedLimit: interaction.options.getInteger("limit"),
+    reply: (payload) => interaction.editReply(payload),
+    editReply: (_statusMessage, content) => interaction.editReply(content),
+  });
+}
+
+function isSupportedMetaUrl(input) {
+  try {
+    const url = new URL(input);
+    const hostname = url.hostname.toLowerCase().replace(/^www\./, "");
+    return (
+      hostname === "instagram.com" ||
+      hostname.endsWith(".instagram.com") ||
+      hostname === "facebook.com" ||
+      hostname.endsWith(".facebook.com") ||
+      hostname === "fb.watch"
+    );
+  } catch (error) {
+    return false;
+  }
+}
+
+function isHttpUrl(input) {
+  try {
+    const url = new URL(input);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch (error) {
+    return false;
+  }
+}
+
+function getMetaDownloadItems(result) {
+  const items = Array.isArray(result?.data) ? result.data : [];
+  return items.filter((item) => item?.url && isHttpUrl(item.url));
+}
+
+function getExtensionFromContentType(contentType) {
+  if (contentType.includes("video/mp4")) return "mp4";
+  if (contentType.includes("video/webm")) return "webm";
+  if (contentType.includes("image/jpeg")) return "jpg";
+  if (contentType.includes("image/png")) return "png";
+  if (contentType.includes("image/webp")) return "webp";
+  return "mp4";
+}
+
+function looksLikeVideoUrl(mediaUrl) {
+  try {
+    const pathname = new URL(mediaUrl).pathname.toLowerCase();
+    return /\.(mp4|mov|m4v|webm)(\?|$)/.test(pathname);
+  } catch (error) {
+    return false;
+  }
+}
+
+async function fetchMediaAttachment(mediaUrl) {
+  const response = await fetch(mediaUrl, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Download failed with status ${response.status}`);
+  }
+
+  const contentLength = Number(response.headers.get("content-length"));
+  if (contentLength > META_MAX_DOWNLOAD_BYTES) {
+    throw new Error("Media is larger than the configured upload limit");
+  }
+
+  const contentType = response.headers.get("content-type") || "video/mp4";
+  const isVideo =
+    contentType.startsWith("video/") ||
+    contentType.includes("application/octet-stream") ||
+    looksLikeVideoUrl(mediaUrl);
+  if (!isVideo) {
+    throw new Error("Downloader returned a non-video file");
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("Downloader response did not include a readable body");
+  }
+
+  const chunks = [];
+  let totalBytes = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    totalBytes += value.length;
+    if (totalBytes > META_MAX_DOWNLOAD_BYTES) {
+      throw new Error("Media is larger than the configured upload limit");
+    }
+
+    chunks.push(Buffer.from(value));
+  }
+
+  const extension = getExtensionFromContentType(contentType);
+  const attachment = new AttachmentBuilder(Buffer.concat(chunks, totalBytes), {
+    name: `meta-download.${extension}`,
+  });
+
+  return { attachment, totalBytes };
+}
+
+async function fetchFirstVideoAttachment(items) {
+  let lastError;
+
+  for (const item of items) {
+    try {
+      return await fetchMediaAttachment(item.url);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("No downloadable video found");
+}
+
+async function getMetaDownloadPayload(url) {
+  if (!url || !isSupportedMetaUrl(url)) {
+    return {
+      content:
+        "Please provide a valid Instagram or Facebook video URL. Example: `!meta https://www.instagram.com/reel/...`",
+      allowedMentions: { parse: [] },
+    };
+  }
+
+  const result = await metaDownloader(url);
+  const items = getMetaDownloadItems(result);
+
+  if (!result?.status || items.length === 0) {
+    return {
+      content:
+        "I could not find a downloadable video for that URL. Check that the post is public and try again.",
+      allowedMentions: { parse: [] },
+    };
+  }
+
+  const { attachment } = await fetchFirstVideoAttachment(items);
+
+  return {
+    content: "Downloaded video:",
+    files: [attachment],
+    allowedMentions: { parse: [] },
+  };
+}
+
+async function downloadMetaFromMessage(message, args) {
+  const url = args[0];
+  const statusMessage = await message.reply({
+    content: "Downloading video...",
+    allowedMentions: { parse: [] },
+  });
+
+  try {
+    const payload = await getMetaDownloadPayload(url);
+    await statusMessage.edit(payload);
+    logger.success(`Downloaded meta video for ${message.author.id}`);
+  } catch (error) {
+    logger.error("Error downloading meta video:", error);
+    await statusMessage.edit({
+      content:
+        "Something went wrong while downloading the video. It may be private, expired, or too large to upload.",
+      allowedMentions: { parse: [] },
+    });
+  }
+}
+
+async function downloadMetaFromInteraction(interaction) {
+  await interaction.deferReply();
+
+  try {
+    const payload = await getMetaDownloadPayload(
+      interaction.options.getString("url"),
+    );
+    await interaction.editReply(payload);
+    logger.success(`Downloaded meta video for ${interaction.user.id}`);
+  } catch (error) {
+    logger.error("Error downloading meta video:", error);
+    await interaction.editReply({
+      content:
+        "Something went wrong while downloading the video. It may be private, expired, or too large to upload.",
+      allowedMentions: { parse: [] },
+    });
   }
 }
 
@@ -404,9 +681,7 @@ async function sendToStarboard(
     config.STARBOARD_CHANNEL_ID,
   );
   if (!starboardChannel) {
-    console.error(
-      `❌ Starboard channel ${config.STARBOARD_CHANNEL_ID} not found!`,
-    );
+    logger.error(`Starboard channel ${config.STARBOARD_CHANNEL_ID} not found!`);
     return false;
   }
 
@@ -445,15 +720,15 @@ async function sendToStarboard(
 
       await starboardMessage.edit({ embeds: [embed], components: [row] });
 
-      console.log(
-        `✅ Updated starboard message for ${message.id} (${triggerEmoji}: ${triggerCount} reactions)`,
+      logger.success(
+        `Updated starboard message for ${message.id} (${triggerCount} reactions)`,
       );
       return true;
     } catch (error) {
       if (error.code === 10008) {
         // Unknown Message
-        console.log(
-          `⚠️ Starboard message not found, removing from database and resending`,
+        logger.info(
+          "Starboard message not found, removing from database and resending",
         );
         await Starboard.deleteOne({ originalMessageId: message.id });
         return await sendToStarboard(
@@ -463,7 +738,7 @@ async function sendToStarboard(
           allReactions,
         );
       } else {
-        console.error(`Error updating starboard:`, error);
+        logger.error("Error updating starboard:", error);
         return false;
       }
     }
@@ -494,12 +769,12 @@ async function sendToStarboard(
 
       await starboardEntry.save();
 
-      console.log(
-        `✨ Sent new starboard message for ${message.id} (${triggerEmoji}: ${triggerCount} reactions)`,
+      logger.success(
+        `Sent new starboard message for ${message.id} (${triggerCount} reactions)`,
       );
       return true;
     } catch (error) {
-      console.error(`Error sending to starboard:`, error);
+      logger.error("Error sending to starboard:", error);
       return false;
     }
   }
@@ -524,7 +799,7 @@ async function processReactionChange(reaction, user, isAdd) {
     try {
       await reaction.fetch();
     } catch (error) {
-      console.error("Error fetching reaction:", error);
+      logger.error("Error fetching reaction:", error);
       return;
     }
   }
@@ -569,11 +844,11 @@ async function processReactionChange(reaction, user, isAdd) {
           );
           await starboardMessage.delete();
           await Starboard.deleteOne({ originalMessageId: reaction.message.id });
-          console.log(
-            `🗑️ Removed starboard message for ${reaction.message.id} (dropped below threshold)`,
+          logger.success(
+            `Removed starboard message for ${reaction.message.id} (dropped below threshold)`,
           );
         } catch (error) {
-          console.error(`Error removing starboard message:`, error);
+          logger.error("Error removing starboard message:", error);
         }
       }
     }
@@ -581,14 +856,17 @@ async function processReactionChange(reaction, user, isAdd) {
 }
 
 // Event: Bot ready
-client.once("ready", async () => {
-  console.log(`🤖 Logged in as ${client.user.tag}`);
-  console.log(
-    `📊 Monitoring for ANY emoji with ${config.REACTION_THRESHOLD}+ reactions`,
+client.once("clientReady", async () => {
+  logger.info(`Logged in as ${client.user.tag}`);
+  logger.info(
+    `Monitoring for ANY emoji with ${config.REACTION_THRESHOLD}+ reactions`,
   );
-  console.log(`⭐ Starboard channel: ${config.STARBOARD_CHANNEL_ID}`);
+  logger.info(`Starboard channel: ${config.STARBOARD_CHANNEL_ID}`);
 
   await connectMongoDB();
+
+  await client.application.commands.set(slashCommands);
+  logger.success("Slash commands registered");
 
   // Set bot status
   client.user.setPresence({
@@ -635,7 +913,7 @@ client.on("messageDelete", async (message) => {
     }
 
     await Starboard.deleteOne({ originalMessageId: message.id });
-    console.log(`🗑️ Removed starboard entry for deleted message ${message.id}`);
+    logger.success(`Removed starboard entry for deleted message ${message.id}`);
   }
 });
 
@@ -650,14 +928,16 @@ client.on("messageCreate", async (message) => {
 
   if (command === "starboard" || command === "sb") {
     if (args[0] === "copy") {
-      await copyChannelMessages(message, args);
+      await copyChannelMessagesFromMessage(message, args.slice(1));
+    } else if (args[0] === "meta") {
+      await downloadMetaFromMessage(message, args.slice(1));
     } else if (args[0] === "stats") {
       const totalStarred = await Starboard.countDocuments({
         guildId: message.guild.id,
       });
 
       const embed = new EmbedBuilder()
-        .setTitle("⭐ Starboard Statistics")
+        .setTitle("Starboard Statistics")
         .setColor(config.COLORS.INFO)
         .addFields(
           {
@@ -673,7 +953,8 @@ client.on("messageCreate", async (message) => {
           },
           {
             name: "Features",
-            value: `• Any emoji triggers\n• Auto-updates on more reactions\n• Images & GIFs supported\n• Clean, simple format`,
+            value:
+              "- Any emoji triggers\n- Auto-updates on more reactions\n- Images & GIFs supported\n- Clean, simple format",
             inline: false,
           },
         )
@@ -686,27 +967,27 @@ client.on("messageCreate", async (message) => {
       await message.reply({ embeds: [embed] });
     } else if (args[0] === "help") {
       const embed = new EmbedBuilder()
-        .setTitle("⭐ Starboard Bot Help")
+        .setTitle("Starboard Bot Help")
         .setDescription(
           "This bot automatically posts messages to the starboard when **ANY single emoji** reaches 4 or more reactions.",
         )
         .setColor(config.COLORS.INFO)
         .addFields(
           {
-            name: "📋 How it works",
+            name: "How it works",
             value:
-              "• When any emoji on a message gets 4+ reactions, it gets posted to the starboard\n• If reactions increase, the starboard message updates\n• Each message only appears once (with the emoji that triggered it)\n• **Images and GIFs are fully supported!**",
+              "- When any emoji on a message gets 4+ reactions, it gets posted to the starboard\n- If reactions increase, the starboard message updates\n- Each message only appears once with the emoji that triggered it\n- **Images and GIFs are fully supported!**",
             inline: false,
           },
           {
-            name: "🎮 Commands",
+            name: "Commands",
             value:
-              "`!starboard stats` - View bot statistics\n`!starboard help` - Show this help message\n`!starboard copy #channel [limit]` - Copy messages from a channel into the channel where you run the command",
+              "`!starboard stats` - View bot statistics\n`!starboard help` - Show this help message\n`!starboard copy #channel [limit]` - Copy messages from a channel into the channel where you run the command\n`!starboard meta <url>` - Download an Instagram or Facebook video",
             inline: false,
           },
           {
-            name: "⚙️ Settings",
-            value: `• Threshold: **${config.REACTION_THRESHOLD}+** reactions\n• Starboard channel: <#${config.STARBOARD_CHANNEL_ID}>\n• Any emoji works: 😂 ❤️ 👍 🎉 etc.`,
+            name: "Settings",
+            value: `- Threshold: **${config.REACTION_THRESHOLD}+** reactions\n- Starboard channel: <#${config.STARBOARD_CHANNEL_ID}>\n- Any emoji works`,
             inline: false,
           },
         )
@@ -716,12 +997,114 @@ client.on("messageCreate", async (message) => {
     } else {
       const embed = new EmbedBuilder()
         .setDescription(
-          "⭐ **Starboard Bot Commands:**\n`!starboard stats` - View statistics\n`!starboard help` - Show help\n`!starboard copy #channel [limit]` - Copy messages into the current channel",
+          "**Starboard Bot Commands:**\n`!starboard stats` - View statistics\n`!starboard help` - Show help\n`!starboard copy #channel [limit]` - Copy messages into the current channel\n`!starboard meta <url>` - Download an Instagram or Facebook video",
         )
         .setColor(config.COLORS.INFO);
 
       await message.reply({ embeds: [embed] });
     }
+  }
+});
+
+async function createStatsEmbed(guild, user) {
+  const totalStarred = await Starboard.countDocuments({
+    guildId: guild.id,
+  });
+
+  return new EmbedBuilder()
+    .setTitle("Starboard Statistics")
+    .setColor(config.COLORS.INFO)
+    .addFields(
+      {
+        name: "Threshold",
+        value: `${config.REACTION_THRESHOLD}+ reactions on ANY emoji`,
+        inline: false,
+      },
+      { name: "Messages Starred", value: `${totalStarred}`, inline: true },
+      {
+        name: "Starboard Channel",
+        value: `<#${config.STARBOARD_CHANNEL_ID}>`,
+        inline: true,
+      },
+      {
+        name: "Features",
+        value:
+          "- Any emoji triggers\n- Auto-updates on more reactions\n- Images & GIFs supported\n- Clean, simple format",
+        inline: false,
+      },
+    )
+    .setTimestamp()
+    .setFooter({
+      text: `Requested by ${user.displayName}`,
+      iconURL: user.avatarURL(),
+    });
+}
+
+function createHelpEmbed() {
+  return new EmbedBuilder()
+    .setTitle("Starboard Bot Help")
+    .setDescription(
+      `This bot automatically posts messages to the starboard when **ANY single emoji** reaches ${config.REACTION_THRESHOLD} or more reactions.`,
+    )
+    .setColor(config.COLORS.INFO)
+    .addFields(
+      {
+        name: "How it works",
+        value:
+          "- When any emoji on a message reaches the threshold, it gets posted to the starboard\n- If reactions increase, the starboard message updates\n- Each message only appears once with the emoji that triggered it\n- Images and GIFs are fully supported",
+        inline: false,
+      },
+      {
+        name: "Commands",
+        value:
+          "`!stats` or `/stats` - View bot statistics\n`!help` or `/help` - Show this help message\n`!copy #channel [limit]` or `/copy source:#channel limit:10` - Copy messages from a channel into the channel where you run the command\n`!meta <url>` or `/meta url:<url>` - Download an Instagram or Facebook video",
+        inline: false,
+      },
+      {
+        name: "Settings",
+        value: `- Threshold: **${config.REACTION_THRESHOLD}+** reactions\n- Starboard channel: <#${config.STARBOARD_CHANNEL_ID}>\n- Any emoji works`,
+        inline: false,
+      },
+    )
+    .setTimestamp();
+}
+
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+  if (!message.guild) return;
+  if (!message.content.startsWith(config.PREFIX)) return;
+
+  const args = message.content.slice(config.PREFIX.length).trim().split(/ +/);
+  const command = args.shift()?.toLowerCase();
+
+  if (command === "copy") {
+    await copyChannelMessagesFromMessage(message, args);
+  } else if (command === "meta") {
+    await downloadMetaFromMessage(message, args);
+  } else if (command === "stats") {
+    await message.reply({
+      embeds: [await createStatsEmbed(message.guild, message.author)],
+    });
+  } else if (command === "help") {
+    await message.reply({ embeds: [createHelpEmbed()] });
+  }
+});
+
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  if (!interaction.guild) return;
+
+  if (interaction.commandName === "copy") {
+    await copyChannelMessagesFromInteraction(interaction);
+  } else if (interaction.commandName === "meta") {
+    await downloadMetaFromInteraction(interaction);
+  } else if (interaction.commandName === "stats") {
+    await interaction.reply({
+      embeds: [await createStatsEmbed(interaction.guild, interaction.user)],
+      ephemeral: true,
+    });
+  } else if (interaction.commandName === "help") {
+    await interaction.reply({ embeds: [createHelpEmbed()], ephemeral: true });
   }
 });
 
@@ -739,20 +1122,20 @@ const server = http.createServer((req, res) => {
 });
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`🌐 Health check server running on port ${PORT}`);
+  logger.info(`Health check server running on port ${PORT}`);
 });
 
 // Handle errors
 client.on("error", (error) => {
-  console.error("Discord client error:", error);
+  logger.error("Discord client error:", error);
 });
 
 process.on("unhandledRejection", (error) => {
-  console.error("Unhandled promise rejection:", error);
+  logger.error("Unhandled promise rejection:", error);
 });
 
 process.on("SIGTERM", () => {
-  console.log("SIGTERM received, shutting down...");
+  logger.info("SIGTERM received, shutting down...");
   client.destroy();
   server.close();
   process.exit(0);
@@ -761,7 +1144,7 @@ process.on("SIGTERM", () => {
 // Login to Discord
 const TOKEN = process.env.DISCORD_TOKEN;
 if (!TOKEN) {
-  console.error("❌ Please set your Discord bot token in the .env file");
+  logger.error("Please set your Discord bot token in the .env file");
   process.exit(1);
 }
 

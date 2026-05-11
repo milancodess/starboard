@@ -9,8 +9,9 @@
   },
   "dependencies": {
     "discord.js": "^14.14.1",
-    "mongoose": "^8.0.0",
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.3.1",
+    "metadownloader": "^1.0.0",
+    "mongoose": "^8.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
