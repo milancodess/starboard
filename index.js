@@ -8,6 +8,8 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  PermissionFlagsBits,
+  MessageFlags,
 } = require("discord.js");
 const mongoose = require("mongoose");
 const Starboard = require("./models/Starboard");
@@ -181,6 +183,190 @@ function createJumpButton(message) {
   );
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resolveChannelArgument(message, channelArg) {
+  if (!channelArg) return null;
+
+  const channelId = channelArg.replace(/[<#>]/g, "");
+  return message.guild.channels.cache.get(channelId) || null;
+}
+
+function userCanCopyMessages(message) {
+  return message.member.permissions.has(PermissionFlagsBits.ManageGuild);
+}
+
+function botCanCopyMessages(sourceChannel, destinationChannel) {
+  const sourcePermissions = sourceChannel.permissionsFor(client.user);
+  const destinationPermissions = destinationChannel.permissionsFor(client.user);
+
+  return (
+    sourcePermissions?.has([
+      PermissionFlagsBits.ViewChannel,
+      PermissionFlagsBits.ReadMessageHistory,
+    ]) &&
+    destinationPermissions?.has([
+      PermissionFlagsBits.ViewChannel,
+      PermissionFlagsBits.SendMessages,
+      PermissionFlagsBits.AttachFiles,
+    ])
+  );
+}
+
+function createCopiedMessagePayload(originalMessage) {
+  const parts = [];
+
+  if (originalMessage.content) {
+    parts.push(originalMessage.content);
+  }
+
+  if (originalMessage.stickers.size > 0) {
+    for (const sticker of originalMessage.stickers.values()) {
+      parts.push(`Sticker: ${sticker.name || "Sticker"}`);
+    }
+  }
+
+  const files = [];
+  for (const attachment of originalMessage.attachments.values()) {
+    files.push({
+      attachment: attachment.url,
+      name: attachment.name || undefined,
+    });
+  }
+
+  const body = parts.join("\n").trim();
+
+  return {
+    content: body.length > 2000 ? `${body.slice(0, 1997)}...` : body,
+    files,
+    allowedMentions: { parse: [] },
+    flags: MessageFlags.SuppressEmbeds,
+  };
+}
+
+async function fetchChannelMessages(channel, limit = null) {
+  const messages = [];
+  let before;
+
+  while (!limit || messages.length < limit) {
+    const remaining = limit ? limit - messages.length : 100;
+    const batchSize = Math.min(100, remaining);
+    const options = { limit: batchSize };
+
+    if (before) {
+      options.before = before;
+    }
+
+    const batch = await channel.messages.fetch(options);
+    if (batch.size === 0) break;
+
+    messages.push(...batch.values());
+    before = batch.last().id;
+
+    if (batch.size < batchSize) break;
+  }
+
+  return messages.reverse();
+}
+
+async function copyChannelMessages(commandMessage, args) {
+  if (!userCanCopyMessages(commandMessage)) {
+    await commandMessage.reply({
+      content: "You need the **Manage Server** permission to copy channels.",
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  const sourceChannel = resolveChannelArgument(commandMessage, args[1]);
+  const destinationChannel = commandMessage.channel;
+
+  if (!sourceChannel || !sourceChannel.isTextBased()) {
+    await commandMessage.reply({
+      content:
+        "Please choose a text channel to copy from. Example: `!starboard copy #source-channel`",
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  if (sourceChannel.id === destinationChannel.id) {
+    await commandMessage.reply({
+      content:
+        "Choose a different destination channel, then run the command there.",
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  if (!botCanCopyMessages(sourceChannel, destinationChannel)) {
+    await commandMessage.reply({
+      content:
+        "I need permission to view/read the source channel and send messages with attachments in this channel.",
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  const requestedLimit = args[2] ? parseInt(args[2], 10) : null;
+  if (args[2] && (!Number.isInteger(requestedLimit) || requestedLimit < 1)) {
+    await commandMessage.reply({
+      content: "The optional limit must be a positive number.",
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  const statusMessage = await commandMessage.reply({
+    content: `Copying messages from ${sourceChannel} into this channel...`,
+    allowedMentions: { parse: [] },
+  });
+
+  try {
+    const messages = await fetchChannelMessages(sourceChannel, requestedLimit);
+    let copiedCount = 0;
+    let skippedCount = 0;
+
+    for (const originalMessage of messages) {
+      if (
+        originalMessage.system ||
+        originalMessage.author.id === client.user.id
+      ) {
+        skippedCount++;
+        continue;
+      }
+
+      const payload = createCopiedMessagePayload(originalMessage);
+      if (!payload.content && payload.files.length === 0) {
+        skippedCount++;
+        continue;
+      }
+
+      await destinationChannel.send(payload);
+      copiedCount++;
+
+      if (copiedCount % 25 === 0) {
+        await statusMessage.edit(
+          `Copying messages from ${sourceChannel}... ${copiedCount}/${messages.length} copied.`,
+        );
+      }
+
+      await sleep(750);
+    }
+
+    await statusMessage.edit(
+      `Done copying from ${sourceChannel}. Copied ${copiedCount} message(s), skipped ${skippedCount}.`,
+    );
+  } catch (error) {
+    console.error("Error copying channel messages:", error);
+    await statusMessage.edit(
+      "Something went wrong while copying messages. Check my channel permissions and try again.",
+    );
+  }
+}
+
 // Check if any emoji has reached threshold
 function checkThreshold(reactions) {
   for (const count of Object.values(reactions)) {
@@ -284,14 +470,13 @@ async function sendToStarboard(
   } else {
     // Send new starboard message
     try {
-      const embed = createStarboardEmbed(
-        message,
-        triggerEmoji,
-        triggerCount,
-      );
+      const embed = createStarboardEmbed(message, triggerEmoji, triggerCount);
       const row = createJumpButton(message);
 
-      const starboardMessage = await starboardChannel.send({ embeds: [embed], components: [row] });
+      const starboardMessage = await starboardChannel.send({
+        embeds: [embed],
+        components: [row],
+      });
 
       // Save to database
       const starboardEntry = new Starboard({
@@ -457,13 +642,16 @@ client.on("messageDelete", async (message) => {
 // Command: Help
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
+  if (!message.guild) return;
   if (!message.content.startsWith(config.PREFIX)) return;
 
   const args = message.content.slice(config.PREFIX.length).trim().split(/ +/);
   const command = args.shift().toLowerCase();
 
   if (command === "starboard" || command === "sb") {
-    if (args[0] === "stats") {
+    if (args[0] === "copy") {
+      await copyChannelMessages(message, args);
+    } else if (args[0] === "stats") {
       const totalStarred = await Starboard.countDocuments({
         guildId: message.guild.id,
       });
@@ -513,7 +701,7 @@ client.on("messageCreate", async (message) => {
           {
             name: "🎮 Commands",
             value:
-              "`!starboard stats` - View bot statistics\n`!starboard help` - Show this help message",
+              "`!starboard stats` - View bot statistics\n`!starboard help` - Show this help message\n`!starboard copy #channel [limit]` - Copy messages from a channel into the channel where you run the command",
             inline: false,
           },
           {
@@ -528,7 +716,7 @@ client.on("messageCreate", async (message) => {
     } else {
       const embed = new EmbedBuilder()
         .setDescription(
-          "⭐ **Starboard Bot Commands:**\n`!starboard stats` - View statistics\n`!starboard help` - Show help",
+          "⭐ **Starboard Bot Commands:**\n`!starboard stats` - View statistics\n`!starboard help` - Show help\n`!starboard copy #channel [limit]` - Copy messages into the current channel",
         )
         .setColor(config.COLORS.INFO);
 
@@ -541,11 +729,13 @@ client.on("messageCreate", async (message) => {
 const http = require("http");
 const server = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({
-    status: "online",
-    bot: client.user?.tag || "connecting",
-    guilds: client.guilds?.cache?.size || 0,
-  }));
+  res.end(
+    JSON.stringify({
+      status: "online",
+      bot: client.user?.tag || "connecting",
+      guilds: client.guilds?.cache?.size || 0,
+    }),
+  );
 });
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
