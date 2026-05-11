@@ -223,7 +223,7 @@ function createStarboardEmbed(message, triggerEmoji, triggerCount) {
   }
 
   embed.addFields({
-    name: "Trigger Reactions",
+    name: `${triggerEmoji} Reactions`,
     value: `${triggerCount} reactions`,
     inline: false,
   });
