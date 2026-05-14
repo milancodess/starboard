@@ -1258,6 +1258,22 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: "Failed to fetch Epic Games data" }));
         return;
       }
+      if (result.isDropped) {
+        const channel = client.channels.cache.get(config.GAMES_CHANNEL_ID);
+        if (channel) {
+          const guild = channel.guild;
+          const role = await ensureGamesRole(guild);
+          const alreadySent = result.freeGames.every((g) => announcedGames.has(g.title));
+          if (!alreadySent) {
+            result.freeGames.forEach((g) => announcedGames.add(g.title));
+            await channel.send({
+              content: `${role}`,
+              embeds: [buildEpicEmbed(result)],
+              allowedMentions: { roles: [role.id] },
+            });
+          }
+        }
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
     } catch (error) {

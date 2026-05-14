@@ -1,6 +1,6 @@
 {
   "name": "discord-starboard-bot",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A Discord starboard bot that triggers when ANY individual emoji reaches 4+ reactions",
   "main": "index.js",
   "scripts": {
