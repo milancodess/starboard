@@ -16,6 +16,7 @@ const {
 } = require("discord.js");
 const mongoose = require("mongoose");
 const Starboard = require("./models/Starboard");
+const FreeGame = require("./models/FreeGame");
 const config = require("./config");
 const metaDownloader = require("metadownloader");
 const { getEpicFreeGames } = require("./epic");
@@ -1153,22 +1154,37 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-const announcedGames = new Set();
+async function getNewGameDrops(games) {
+  const newGames = [];
+  for (const game of games) {
+    const exists = await FreeGame.findOne({ title: game.title, effectiveDate: game.effectiveDate });
+    if (!exists) newGames.push(game);
+  }
+  return newGames;
+}
+
+async function saveAnnouncedGames(games) {
+  for (const game of games) {
+    await FreeGame.findOneAndUpdate(
+      { title: game.title, effectiveDate: game.effectiveDate },
+      { title: game.title, effectiveDate: game.effectiveDate, announcedAt: new Date() },
+      { upsert: true },
+    );
+  }
+}
 
 async function autoCheckGames() {
   try {
     const result = await getEpicFreeGames();
     if (!result) return;
-    const newDrops = result.freeGames.filter(
-      (g) => new Date(g.effectiveDate) <= Date.now() && !announcedGames.has(g.title),
-    );
+    const newDrops = await getNewGameDrops(result.freeGames);
     if (newDrops.length === 0) return;
-    newDrops.forEach((g) => announcedGames.add(g.title));
     const channelId = config.GAMES_CHANNEL_ID;
     const channel = client.channels.cache.get(channelId);
     if (!channel) return;
     const guild = channel.guild;
     const role = await ensureGamesRole(guild);
+    await saveAnnouncedGames(newDrops);
     await channel.send({
       content: `${role}`,
       embeds: [buildEpicEmbed(result)],
@@ -1259,13 +1275,13 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (result.isDropped) {
-        const channel = client.channels.cache.get(config.GAMES_CHANNEL_ID);
-        if (channel) {
-          const guild = channel.guild;
-          const role = await ensureGamesRole(guild);
-          const alreadySent = result.freeGames.every((g) => announcedGames.has(g.title));
-          if (!alreadySent) {
-            result.freeGames.forEach((g) => announcedGames.add(g.title));
+        const newDrops = await getNewGameDrops(result.freeGames);
+        if (newDrops.length > 0) {
+          const channel = client.channels.cache.get(config.GAMES_CHANNEL_ID);
+          if (channel) {
+            const guild = channel.guild;
+            const role = await ensureGamesRole(guild);
+            await saveAnnouncedGames(newDrops);
             await channel.send({
               content: `${role}`,
               embeds: [buildEpicEmbed(result)],
