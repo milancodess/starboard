@@ -18,6 +18,7 @@ const mongoose = require("mongoose");
 const Starboard = require("./models/Starboard");
 const config = require("./config");
 const metaDownloader = require("metadownloader");
+const { getEpicFreeGames } = require("./epic");
 
 const META_MAX_DOWNLOAD_BYTES =
   (parseInt(process.env.META_MAX_DOWNLOAD_MB, 10) || 25) * 1024 * 1024;
@@ -87,6 +88,9 @@ const slashCommands = [
         .setDescription("Instagram or Facebook video URL")
         .setRequired(true),
     ),
+  new SlashCommandBuilder()
+    .setName("games")
+    .setDescription("Show current free games on Epic Games Store"),
 ].map((command) => command.toJSON());
 
 // MongoDB Connection
@@ -868,6 +872,9 @@ client.once("clientReady", async () => {
   await client.application.commands.set(slashCommands);
   logger.success("Slash commands registered");
 
+  autoCheckGames();
+  setInterval(autoCheckGames, 30 * 60 * 1000);
+
   // Set bot status
   client.user.setPresence({
     activities: [
@@ -1087,6 +1094,25 @@ client.on("messageCreate", async (message) => {
     });
   } else if (command === "help") {
     await message.reply({ embeds: [createHelpEmbed()] });
+  } else if (command === "games") {
+    const statusMsg = await message.reply({ content: "Fetching Epic Games free games..." });
+    try {
+      const result = await getEpicFreeGames();
+      if (!result || result.freeGames.length === 0) {
+        await statusMsg.edit({ content: "No free games available at the moment." });
+        return;
+      }
+      const role = await ensureGamesRole(message.guild);
+      const roleText = result.isDropped ? `${role}\n` : "";
+      await statusMsg.edit({
+        content: roleText,
+        embeds: [buildEpicEmbed(result)],
+        allowedMentions: { roles: role ? [role.id] : [] },
+      });
+    } catch (error) {
+      logger.error("Error in !games command:", error);
+      await statusMsg.edit({ content: "Something went wrong fetching Epic Games data." });
+    }
   }
 });
 
@@ -1105,12 +1131,142 @@ client.on("interactionCreate", async (interaction) => {
     });
   } else if (interaction.commandName === "help") {
     await interaction.reply({ embeds: [createHelpEmbed()], ephemeral: true });
+  } else if (interaction.commandName === "games") {
+    await interaction.deferReply();
+    try {
+      const result = await getEpicFreeGames();
+      if (!result || result.freeGames.length === 0) {
+        await interaction.editReply({ content: "No free games available at the moment." });
+        return;
+      }
+      const role = await ensureGamesRole(interaction.guild);
+      const roleText = result.isDropped ? `${role}\n` : "";
+      await interaction.editReply({
+        content: roleText,
+        embeds: [buildEpicEmbed(result)],
+        allowedMentions: { roles: role ? [role.id] : [] },
+      });
+    } catch (error) {
+      logger.error("Error in /games command:", error);
+      await interaction.editReply({ content: "Something went wrong fetching Epic Games data." });
+    }
   }
 });
 
+const announcedGames = new Set();
+
+async function autoCheckGames() {
+  try {
+    const result = await getEpicFreeGames();
+    if (!result) return;
+    const newDrops = result.freeGames.filter(
+      (g) => new Date(g.effectiveDate) <= Date.now() && !announcedGames.has(g.title),
+    );
+    if (newDrops.length === 0) return;
+    newDrops.forEach((g) => announcedGames.add(g.title));
+    const channelId = config.GAMES_CHANNEL_ID;
+    const channel = client.channels.cache.get(channelId);
+    if (!channel) return;
+    const guild = channel.guild;
+    const role = await ensureGamesRole(guild);
+    await channel.send({
+      content: `${role}`,
+      embeds: [buildEpicEmbed(result)],
+      allowedMentions: { roles: [role.id] },
+    });
+    logger.success(`Auto-announced ${newDrops.length} new free game(s)`);
+  } catch (error) {
+    logger.error("Auto-check games error:", error);
+  }
+}
+
+function formatNepaliTime(dateStr) {
+  const d = new Date(dateStr);
+  return d.toLocaleString("en-US", {
+    timeZone: "Asia/Katmandu",
+    dateStyle: "long",
+    timeStyle: "short",
+    hourCycle: "h23",
+  });
+}
+
+function buildEpicEmbed(result) {
+  const { freeGames, onSaleGames } = result;
+  const embed = new EmbedBuilder()
+    .setTitle("Epic Games Store - Free Games")
+    .setColor(config.COLORS.INFO)
+    .setURL("https://store.epicgames.com/")
+    .setTimestamp();
+
+  freeGames.forEach((game) => {
+    let value = "";
+    if (game.isFree) {
+      if (
+        game.originalPrice &&
+        game.originalPrice !== "N/A" &&
+        game.originalPrice !== "0"
+      ) {
+        value += `~~${game.originalPrice}~~ **Free**\n`;
+      } else {
+        value += "**Free**\n";
+      }
+    }
+    const effectiveDate = new Date(game.effectiveDate);
+    const now = Date.now();
+    if (effectiveDate > now) {
+      value += `Drops: ${formatNepaliTime(game.effectiveDate)} (Nepali Time)\n`;
+    } else {
+      value += `Available since: ${formatNepaliTime(game.effectiveDate)}\n`;
+    }
+    if (game.slug) {
+      value += `[View on Epic](https://store.epicgames.com/p/${game.slug})`;
+    }
+    embed.addFields({ name: game.title, value, inline: false });
+  });
+
+  if (freeGames[0]?.thumbnail) {
+    embed.setThumbnail(freeGames[0].thumbnail);
+  }
+
+  embed.setFooter({
+    text: `${freeGames.length} free game${freeGames.length > 1 ? "s" : ""} available`,
+  });
+  return embed;
+}
+
+async function ensureGamesRole(guild) {
+  let role = guild.roles.cache.find((r) => r.name === "Games");
+  if (!role) {
+    role = await guild.roles.create({
+      name: "Games",
+      color: config.COLORS.INFO,
+      mentionable: true,
+      reason: "Role for free games notifications",
+    });
+  }
+  return role;
+}
+
 // HTTP health check server for Render
 const http = require("http");
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
+  if (req.url === "/api/epic-games" && req.method === "GET") {
+    try {
+      const result = await getEpicFreeGames();
+      if (!result) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Failed to fetch Epic Games data" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (error) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(
     JSON.stringify({
