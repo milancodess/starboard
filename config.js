@@ -5,6 +5,11 @@ module.exports = {
   PREFIX: process.env.PREFIX || "!",
   MONGODB_URI: process.env.MONGODB_URI,
   GAMES_CHANNEL_ID: process.env.GAMES_CHANNEL_ID || "1504374287245512734",
+  SEMESTER_ROLE_IDS: (process.env.SEMESTER_ROLE_IDS || "")
+    .split(",")
+    .map((roleId) => roleId.trim())
+    .filter(Boolean),
+  ENTRANCE_PREP_ROLE_ID: process.env.ENTRANCE_PREP_ROLE_ID,
   ALLOW_BOT_MESSAGES: process.env.ALLOW_BOT_MESSAGES === "true",
   ALLOW_SELF_REACT: process.env.ALLOW_SELF_REACT === "true",
   REMOVE_ON_THRESHOLD_DROP: process.env.REMOVE_ON_THRESHOLD_DROP === "true",

@@ -55,7 +55,7 @@ Default prefix: `!`
    - Attach Files
    - Use Slash Commands
 
-The `copy` command requires the user running it to have the Discord `Manage Server` permission. The `switch` command requires the user running it to have the Discord `Administrator` permission, and the bot needs `Manage Roles` with its highest role above the semester roles.
+The `copy` command requires the user running it to have the Discord `Manage Server` permission. The `switch` command requires the user running it to have the Discord `Administrator` permission, and the bot needs `Manage Roles` with its highest role above the configured study roles.
 
 ## Installation
 
@@ -71,6 +71,8 @@ Create a `.env` file in the project root:
 DISCORD_TOKEN=your_discord_bot_token
 MONGODB_URI=your_mongodb_connection_string
 STARBOARD_CHANNEL_ID=your_starboard_channel_id
+SEMESTER_ROLE_IDS=first_role_id,second_role_id,third_role_id,fourth_role_id,fifth_role_id,sixth_role_id,seventh_role_id,eighth_role_id
+ENTRANCE_PREP_ROLE_ID=entrance_prep_role_id
 
 REACTION_THRESHOLD=4
 PREFIX=!
@@ -106,6 +108,8 @@ npm run dev
 | `STARBOARD_CHANNEL_ID`     | Yes      | Built-in fallback | Channel where starboard posts are sent. Set this to your own server's starboard channel. |
 | `REACTION_THRESHOLD`       | No       | `4`               | Number of reactions needed for a message to reach starboard.                             |
 | `PREFIX`                   | No       | `!`               | Prefix for text commands.                                                                |
+| `SEMESTER_ROLE_IDS`        | No       | None              | Comma-separated role IDs for First Semester through Eighth Semester, in order.            |
+| `ENTRANCE_PREP_ROLE_ID`    | No       | None              | Role ID for the Entrance Prep role used by the `switch` command.                         |
 | `ALLOW_BOT_MESSAGES`       | No       | `false`           | Whether bot-authored messages can be starred.                                            |
 | `ALLOW_SELF_REACT`         | No       | `false`           | Whether users can trigger starboard by reacting to their own messages.                   |
 | `REMOVE_ON_THRESHOLD_DROP` | No       | `false`           | Whether starboard posts are removed if reactions drop below the threshold.               |

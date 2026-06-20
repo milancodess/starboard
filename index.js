@@ -94,18 +94,18 @@ const slashCommands = [
     .setDescription("Show current free games on Epic Games Store"),
   new SlashCommandBuilder()
     .setName("switch")
-    .setDescription("Move members from one semester role to another")
+    .setDescription("Move members between configured study roles")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addStringOption((option) =>
       option
         .setName("current_sem")
-        .setDescription("Current semester role, for example First or First Semester")
+        .setDescription("Current role, for example First Semester or Entrance Prep")
         .setRequired(true),
     )
     .addStringOption((option) =>
       option
         .setName("new_sem")
-        .setDescription("New semester role, for example Second or Second Semester")
+        .setDescription("New role, for example Second Semester or Entrance Prep")
         .setRequired(true),
     )
     .addUserOption((option) =>
@@ -343,8 +343,45 @@ function getSemesterWord(input) {
   return semesterWords[normalizedInput] || null;
 }
 
+function getSemesterIndex(input) {
+  const semesterWord = getSemesterWord(input);
+  if (!semesterWord) return -1;
+
+  return [
+    "First",
+    "Second",
+    "Third",
+    "Fourth",
+    "Fifth",
+    "Sixth",
+    "Seventh",
+    "Eighth",
+  ].indexOf(semesterWord);
+}
+
 function normalizeRoleName(name) {
   return name.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function resolveConfiguredStudyRole(guild, input) {
+  const trimmedInput = input?.trim();
+  if (!trimmedInput) return null;
+
+  const normalizedInput = normalizeRoleName(trimmedInput);
+  if (
+    ["entrance", "entrance prep", "entrance preparation"].includes(
+      normalizedInput,
+    ) &&
+    config.ENTRANCE_PREP_ROLE_ID
+  ) {
+    return guild.roles.cache.get(config.ENTRANCE_PREP_ROLE_ID) || null;
+  }
+
+  const semesterIndex = getSemesterIndex(trimmedInput);
+  if (semesterIndex === -1) return null;
+
+  const semesterRoleId = config.SEMESTER_ROLE_IDS[semesterIndex];
+  return semesterRoleId ? guild.roles.cache.get(semesterRoleId) || null : null;
 }
 
 function resolveSemesterRole(guild, input) {
@@ -354,6 +391,9 @@ function resolveSemesterRole(guild, input) {
   const roleId = trimmedInput.replace(/[<@&>]/g, "");
   const mentionedRole = guild.roles.cache.get(roleId);
   if (mentionedRole) return mentionedRole;
+
+  const configuredRole = resolveConfiguredStudyRole(guild, trimmedInput);
+  if (configuredRole) return configuredRole;
 
   const candidates = new Set([trimmedInput]);
   const withoutSemester = trimmedInput.replace(/\s+semester$/i, "").trim();
@@ -404,11 +444,13 @@ async function switchSemesterRoles({
 }) {
   if (!userCanSwitchSemesters(member)) {
     await reply({
-      content: "Only server administrators can switch semester roles.",
+      content: "Only server administrators can switch study roles.",
       allowedMentions: { parse: [] },
     });
     return;
   }
+
+  await guild.roles.fetch();
 
   const currentRole = resolveSemesterRole(guild, currentSem);
   const newRole = resolveSemesterRole(guild, newSem);
@@ -416,7 +458,7 @@ async function switchSemesterRoles({
   if (!currentRole || !newRole) {
     await reply({
       content:
-        "I could not find one of those semester roles. Try `!switch First Second @user` or `/switch current_sem:First new_sem:Second user:@member`.",
+        "I could not find one of those roles. Try `!switch First Second @user`, `!switch Entrance Prep First @user`, or `/switch current_sem:First new_sem:Second user:@member`.",
       allowedMentions: { parse: [] },
     });
     return;
@@ -438,7 +480,7 @@ async function switchSemesterRoles({
   ) {
     await reply({
       content:
-        "I need the **Manage Roles** permission, and my highest role must be above both semester roles.",
+        "I need the **Manage Roles** permission, and my highest role must be above both configured study roles.",
       allowedMentions: { parse: [] },
     });
     return;
@@ -500,10 +542,10 @@ async function switchSemesterRoles({
       `Switched ${switchedCount} member(s) from **${currentRole.name}** to **${newRole.name}**.${failureText}`,
     );
   } catch (error) {
-    logger.error("Error switching semester roles:", error);
+    logger.error("Error switching study roles:", error);
     await editReply(
       statusMessage,
-      "Something went wrong while switching semester roles. Check my role permissions and try again.",
+      "Something went wrong while switching study roles. Check my role permissions and try again.",
     );
   }
 }
@@ -533,23 +575,33 @@ async function switchSemesterRolesFromMessage(message, args) {
 }
 
 function parseSemesterSwitchArgs(args) {
-  if (
-    args.length >= 4 &&
-    /^sem(ester)?$/i.test(args[1]) &&
-    /^sem(ester)?$/i.test(args[3])
-  ) {
-    return {
-      currentSem: `${args[0]} ${args[1]}`,
-      newSem: `${args[2]} ${args[3]}`,
-      userArg: args[4],
-    };
-  }
+  const currentRoleArg = parseSwitchRoleArgument(args, 0);
+  const newRoleArg = parseSwitchRoleArgument(args, currentRoleArg.nextIndex);
 
   return {
-    currentSem: args[0],
-    newSem: args[1],
-    userArg: args[2],
+    currentSem: currentRoleArg.value,
+    newSem: newRoleArg.value,
+    userArg: args[newRoleArg.nextIndex],
   };
+}
+
+function parseSwitchRoleArgument(args, startIndex) {
+  const first = args[startIndex];
+  const second = args[startIndex + 1];
+
+  if (!first) {
+    return { value: undefined, nextIndex: startIndex };
+  }
+
+  if (second && /^sem(ester)?$/i.test(second)) {
+    return { value: `${first} ${second}`, nextIndex: startIndex + 2 };
+  }
+
+  if (second && /^prep(aration)?$/i.test(second) && /^entrance$/i.test(first)) {
+    return { value: `${first} ${second}`, nextIndex: startIndex + 2 };
+  }
+
+  return { value: first, nextIndex: startIndex + 1 };
 }
 
 async function resolveMemberArgument(guild, userArg) {
