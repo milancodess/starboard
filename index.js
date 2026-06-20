@@ -92,6 +92,28 @@ const slashCommands = [
   new SlashCommandBuilder()
     .setName("games")
     .setDescription("Show current free games on Epic Games Store"),
+  new SlashCommandBuilder()
+    .setName("switch")
+    .setDescription("Move members from one semester role to another")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption((option) =>
+      option
+        .setName("current_sem")
+        .setDescription("Current semester role, for example First or First Semester")
+        .setRequired(true),
+    )
+    .addStringOption((option) =>
+      option
+        .setName("new_sem")
+        .setDescription("New semester role, for example Second or Second Semester")
+        .setRequired(true),
+    )
+    .addUserOption((option) =>
+      option
+        .setName("user")
+        .setDescription("Optional member to switch instead of the whole server")
+        .setRequired(false),
+    ),
 ].map((command) => command.toJSON());
 
 // MongoDB Connection
@@ -260,6 +282,10 @@ function userCanCopyMessages(member) {
   return member.permissions.has(PermissionFlagsBits.ManageGuild);
 }
 
+function userCanSwitchSemesters(member) {
+  return member.permissions.has(PermissionFlagsBits.Administrator);
+}
+
 function botCanCopyMessages(sourceChannel, destinationChannel) {
   const sourcePermissions = sourceChannel.permissionsFor(client.user);
   const destinationPermissions = destinationChannel.permissionsFor(client.user);
@@ -275,6 +301,294 @@ function botCanCopyMessages(sourceChannel, destinationChannel) {
       PermissionFlagsBits.AttachFiles,
     ])
   );
+}
+
+function formatOrdinalSemester(input) {
+  const semesterNumber = input.match(/^\d+$/)?.[0];
+  if (!semesterNumber) return null;
+
+  const number = parseInt(semesterNumber, 10);
+  const suffix =
+    number % 100 >= 11 && number % 100 <= 13
+      ? "th"
+      : { 1: "st", 2: "nd", 3: "rd" }[number % 10] || "th";
+
+  return `${number}${suffix}`;
+}
+
+function getSemesterWord(input) {
+  const normalizedInput = normalizeRoleName(input)
+    .replace(/\s+semester$/, "")
+    .replace(/(\d+)(st|nd|rd|th)$/, "$1");
+
+  const semesterWords = {
+    1: "First",
+    2: "Second",
+    3: "Third",
+    4: "Fourth",
+    5: "Fifth",
+    6: "Sixth",
+    7: "Seventh",
+    8: "Eighth",
+    first: "First",
+    second: "Second",
+    third: "Third",
+    fourth: "Fourth",
+    fifth: "Fifth",
+    sixth: "Sixth",
+    seventh: "Seventh",
+    eighth: "Eighth",
+  };
+
+  return semesterWords[normalizedInput] || null;
+}
+
+function normalizeRoleName(name) {
+  return name.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function resolveSemesterRole(guild, input) {
+  const trimmedInput = input?.trim();
+  if (!trimmedInput) return null;
+
+  const roleId = trimmedInput.replace(/[<@&>]/g, "");
+  const mentionedRole = guild.roles.cache.get(roleId);
+  if (mentionedRole) return mentionedRole;
+
+  const candidates = new Set([trimmedInput]);
+  const withoutSemester = trimmedInput.replace(/\s+semester$/i, "").trim();
+  if (withoutSemester) {
+    candidates.add(withoutSemester);
+    candidates.add(`${withoutSemester} semester`);
+  }
+
+  const ordinalSemester = formatOrdinalSemester(withoutSemester);
+  if (ordinalSemester) {
+    candidates.add(ordinalSemester);
+    candidates.add(`${ordinalSemester} semester`);
+  }
+
+  const semesterWord = getSemesterWord(trimmedInput);
+  if (semesterWord) {
+    candidates.add(semesterWord);
+    candidates.add(`${semesterWord} Semester`);
+  }
+
+  const normalizedCandidates = new Set(
+    [...candidates].map((candidate) => normalizeRoleName(candidate)),
+  );
+
+  return (
+    guild.roles.cache.find((role) =>
+      normalizedCandidates.has(normalizeRoleName(role.name)),
+    ) || null
+  );
+}
+
+function botCanManageRole(guild, role) {
+  const botMember = guild.members.me;
+  return (
+    botMember?.permissions.has(PermissionFlagsBits.ManageRoles) &&
+    role.comparePositionTo(botMember.roles.highest) < 0
+  );
+}
+
+async function switchSemesterRoles({
+  member,
+  guild,
+  currentSem,
+  newSem,
+  targetMember,
+  reply,
+  editReply,
+}) {
+  if (!userCanSwitchSemesters(member)) {
+    await reply({
+      content: "Only server administrators can switch semester roles.",
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  const currentRole = resolveSemesterRole(guild, currentSem);
+  const newRole = resolveSemesterRole(guild, newSem);
+
+  if (!currentRole || !newRole) {
+    await reply({
+      content:
+        "I could not find one of those semester roles. Try `!switch First Second @user` or `/switch current_sem:First new_sem:Second user:@member`.",
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  if (currentRole.id === newRole.id) {
+    await reply({
+      content: "Current semester and new semester are the same role.",
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  await guild.members.fetchMe();
+
+  if (
+    !botCanManageRole(guild, currentRole) ||
+    !botCanManageRole(guild, newRole)
+  ) {
+    await reply({
+      content:
+        "I need the **Manage Roles** permission, and my highest role must be above both semester roles.",
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  const statusMessage = await reply({
+    content: targetMember
+      ? `Switching ${targetMember.user.tag} from **${currentRole.name}** to **${newRole.name}**...`
+      : `Switching members from **${currentRole.name}** to **${newRole.name}**...`,
+    allowedMentions: { parse: [] },
+  });
+
+  try {
+    if (targetMember) {
+      if (!targetMember.roles.cache.has(currentRole.id)) {
+        await editReply(
+          statusMessage,
+          `${targetMember.user.tag} does not have the **${currentRole.name}** role.`,
+        );
+        return;
+      }
+
+      await targetMember.roles.add(newRole);
+      await targetMember.roles.remove(currentRole);
+      await editReply(
+        statusMessage,
+        `Switched ${targetMember.user.tag} from **${currentRole.name}** to **${newRole.name}**.`,
+      );
+      return;
+    }
+
+    const guildMembers = await guild.members.fetch();
+    const membersToSwitch = guildMembers.filter((guildMember) =>
+      guildMember.roles.cache.has(currentRole.id),
+    );
+
+    let switchedCount = 0;
+    let failedCount = 0;
+
+    for (const guildMember of membersToSwitch.values()) {
+      try {
+        await guildMember.roles.add(newRole);
+        await guildMember.roles.remove(currentRole);
+        switchedCount++;
+      } catch (error) {
+        failedCount++;
+        logger.error(
+          `Failed to switch semester role for ${guildMember.user.tag}:`,
+          error,
+        );
+      }
+    }
+
+    const failureText =
+      failedCount > 0 ? ` ${failedCount} member(s) could not be updated.` : "";
+
+    await editReply(
+      statusMessage,
+      `Switched ${switchedCount} member(s) from **${currentRole.name}** to **${newRole.name}**.${failureText}`,
+    );
+  } catch (error) {
+    logger.error("Error switching semester roles:", error);
+    await editReply(
+      statusMessage,
+      "Something went wrong while switching semester roles. Check my role permissions and try again.",
+    );
+  }
+}
+
+async function switchSemesterRolesFromMessage(message, args) {
+  const { currentSem, newSem, userArg } = parseSemesterSwitchArgs(args);
+  const targetMember = await resolveMemberArgument(message.guild, userArg);
+
+  if (userArg && !targetMember) {
+    await message.reply({
+      content:
+        "I could not find that member. Mention them or use their Discord user ID.",
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  await switchSemesterRoles({
+    member: message.member,
+    guild: message.guild,
+    currentSem,
+    newSem,
+    targetMember,
+    reply: (payload) => message.reply(payload),
+    editReply: (statusMessage, content) => statusMessage.edit(content),
+  });
+}
+
+function parseSemesterSwitchArgs(args) {
+  if (
+    args.length >= 4 &&
+    /^sem(ester)?$/i.test(args[1]) &&
+    /^sem(ester)?$/i.test(args[3])
+  ) {
+    return {
+      currentSem: `${args[0]} ${args[1]}`,
+      newSem: `${args[2]} ${args[3]}`,
+      userArg: args[4],
+    };
+  }
+
+  return {
+    currentSem: args[0],
+    newSem: args[1],
+    userArg: args[2],
+  };
+}
+
+async function resolveMemberArgument(guild, userArg) {
+  if (!userArg) return null;
+
+  const userId = userArg.replace(/[<@!>]/g, "");
+  try {
+    return await guild.members.fetch(userId);
+  } catch (error) {
+    return null;
+  }
+}
+
+async function switchSemesterRolesFromInteraction(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+  const targetUser = interaction.options.getUser("user");
+  let targetMember = null;
+
+  if (targetUser) {
+    try {
+      targetMember = await interaction.guild.members.fetch(targetUser.id);
+    } catch (error) {
+      await interaction.editReply({
+        content: "I could not find that member in this server.",
+        allowedMentions: { parse: [] },
+      });
+      return;
+    }
+  }
+
+  await switchSemesterRoles({
+    member: interaction.member,
+    guild: interaction.guild,
+    currentSem: interaction.options.getString("current_sem"),
+    newSem: interaction.options.getString("new_sem"),
+    targetMember,
+    reply: (payload) => interaction.editReply(payload),
+    editReply: (_statusMessage, content) => interaction.editReply(content),
+  });
 }
 
 function createCopiedMessagePayload(originalMessage) {
@@ -937,6 +1251,8 @@ client.on("messageCreate", async (message) => {
   if (command === "starboard" || command === "sb") {
     if (args[0] === "copy") {
       await copyChannelMessagesFromMessage(message, args.slice(1));
+    } else if (args[0] === "switch") {
+      await switchSemesterRolesFromMessage(message, args.slice(1));
     } else if (args[0] === "meta") {
       await downloadMetaFromMessage(message, args.slice(1));
     } else if (args[0] === "stats") {
@@ -990,7 +1306,7 @@ client.on("messageCreate", async (message) => {
           {
             name: "Commands",
             value:
-              "`!starboard stats` - View bot statistics\n`!starboard help` - Show this help message\n`!starboard copy #channel [limit]` - Copy messages from a channel into the channel where you run the command\n`!starboard meta <url>` - Download an Instagram or Facebook video",
+              "`!starboard stats` - View bot statistics\n`!starboard help` - Show this help message\n`!starboard copy #channel [limit]` - Copy messages from a channel into the channel where you run the command\n`!starboard switch <current sem> <new sem> [@user]` - Move members from one semester role to another\n`!starboard meta <url>` - Download an Instagram or Facebook video",
             inline: false,
           },
           {
@@ -1005,7 +1321,7 @@ client.on("messageCreate", async (message) => {
     } else {
       const embed = new EmbedBuilder()
         .setDescription(
-          "**Starboard Bot Commands:**\n`!starboard stats` - View statistics\n`!starboard help` - Show help\n`!starboard copy #channel [limit]` - Copy messages into the current channel\n`!starboard meta <url>` - Download an Instagram or Facebook video",
+          "**Starboard Bot Commands:**\n`!starboard stats` - View statistics\n`!starboard help` - Show help\n`!starboard copy #channel [limit]` - Copy messages into the current channel\n`!starboard switch <current sem> <new sem> [@user]` - Move members from one semester role to another\n`!starboard meta <url>` - Download an Instagram or Facebook video",
         )
         .setColor(config.COLORS.INFO);
 
@@ -1065,7 +1381,7 @@ function createHelpEmbed() {
       {
         name: "Commands",
         value:
-          "`!stats` or `/stats` - View bot statistics\n`!help` or `/help` - Show this help message\n`!copy #channel [limit]` or `/copy source:#channel limit:10` - Copy messages from a channel into the channel where you run the command\n`!meta <url>` or `/meta url:<url>` - Download an Instagram or Facebook video",
+          "`!stats` or `/stats` - View bot statistics\n`!help` or `/help` - Show this help message\n`!copy #channel [limit]` or `/copy source:#channel limit:10` - Copy messages from a channel into the channel where you run the command\n`!switch <current sem> <new sem> [@user]` or `/switch current_sem:First new_sem:Second user:@member` - Move members from one semester role to another\n`!meta <url>` or `/meta url:<url>` - Download an Instagram or Facebook video",
         inline: false,
       },
       {
@@ -1087,6 +1403,8 @@ client.on("messageCreate", async (message) => {
 
   if (command === "copy") {
     await copyChannelMessagesFromMessage(message, args);
+  } else if (command === "switch") {
+    await switchSemesterRolesFromMessage(message, args);
   } else if (command === "meta") {
     await downloadMetaFromMessage(message, args);
   } else if (command === "stats") {
@@ -1123,6 +1441,8 @@ client.on("interactionCreate", async (interaction) => {
 
   if (interaction.commandName === "copy") {
     await copyChannelMessagesFromInteraction(interaction);
+  } else if (interaction.commandName === "switch") {
+    await switchSemesterRolesFromInteraction(interaction);
   } else if (interaction.commandName === "meta") {
     await downloadMetaFromInteraction(interaction);
   } else if (interaction.commandName === "stats") {

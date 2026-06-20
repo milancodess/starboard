@@ -23,10 +23,12 @@ Default prefix: `!`
 | `!help` or `/help`                                           | Show bot help.                                                    |
 | `!stats` or `/stats`                                         | Show starboard statistics for the server.                         |
 | `!copy #channel [limit]` or `/copy source:#channel limit:10` | Copy messages from another text channel into the current channel. |
+| `!switch <current sem> <new sem> [@user]` or `/switch current_sem:First new_sem:Second user:@member` | Move all members, or one member, from one semester role to another. |
 | `!meta <url>` or `/meta url:<url>`                           | Download and send a public Instagram/Facebook video.              |
 | `!starboard help` or `!sb help`                              | Show starboard command help.                                      |
 | `!starboard stats` or `!sb stats`                            | Show starboard statistics.                                        |
 | `!starboard copy #channel [limit]`                           | Copy messages through the starboard command group.                |
+| `!starboard switch <current sem> <new sem> [@user]`          | Move all members, or one member, from one semester role to another. |
 | `!starboard meta <url>`                                      | Download and send a public Instagram/Facebook video.              |
 
 ## Requirements
@@ -53,7 +55,7 @@ Default prefix: `!`
    - Attach Files
    - Use Slash Commands
 
-The `copy` command requires the user running it to have the Discord `Manage Server` permission.
+The `copy` command requires the user running it to have the Discord `Manage Server` permission. The `switch` command requires the user running it to have the Discord `Administrator` permission, and the bot needs `Manage Roles` with its highest role above the semester roles.
 
 ## Installation
 
